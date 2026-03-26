@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: openclaw-mcp-server
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 mcp_http_server.py
+    envVars:
+      - key: PORT
+        value: 10000
+    healthCheckPath: /health
