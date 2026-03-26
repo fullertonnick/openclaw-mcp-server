@@ -1,35 +1,26 @@
 #!/usr/bin/env python3
 """
-OpenClaw MCP HTTP Server for Render.com
-Standalone version that can run independently
+OpenClaw MCP HTTP Server - Claude Web Compatible
+Optimized for Claude web interface
 """
 
 import asyncio
 import json
-import sys
 import os
-from typing import Any, Dict, List
-from datetime import datetime
+from typing import Dict, List
 from aiohttp import web
 import aiohttp_cors
 
-# Simple in-memory implementation (no VPS dependencies for Render)
 class SimpleMCPBridge:
-    """MCP Server with basic tools"""
-    
     def __init__(self):
-        self.tools = self._define_tools()
-        
-    def _define_tools(self) -> List[Dict]:
-        """Define available tools"""
-        return [
+        self.tools = [
             {
                 "name": "get_user_info",
                 "description": "Get information about Nick Cornelius",
                 "inputSchema": {"type": "object", "properties": {}}
             },
             {
-                "name": "list_active_projects",
+                "name": "list_active_projects", 
                 "description": "List current active projects",
                 "inputSchema": {"type": "object", "properties": {}}
             },
@@ -50,8 +41,8 @@ class SimpleMCPBridge:
     async def handle_initialize(self, params: Dict) -> Dict:
         return {
             "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "openclaw-mcp-render", "version": "1.0.0"}
+            "capabilities": {"tools": {}, "logging": {}},
+            "serverInfo": {"name": "openclaw-mcp", "version": "1.0.0"}
         }
     
     async def handle_tools_list(self, params: Dict) -> Dict:
@@ -66,8 +57,8 @@ class SimpleMCPBridge:
                 "businesses": ["SimpliScale AI Studio", "AI Voice Company"],
                 "revenue": "$70k/month",
                 "location": "Texas (digital nomad)",
-                "contact": "admin@simpliscale.io",
-                "instagram": "@thenickcornelius"
+                "instagram": "@thenickcornelius",
+                "contact": "admin@simpliscale.io"
             }
         elif tool_name == "list_active_projects":
             result = {
@@ -79,98 +70,114 @@ class SimpleMCPBridge:
                 ]
             }
         elif tool_name == "web_search":
-            result = {"message": "Web search requires API key configuration"}
+            result = {"results": [], "note": "Web search not configured"}
         else:
             result = {"error": f"Unknown tool: {tool_name}"}
         
         return {
-            "content": [{"type": "text", "text": json.dumps(result, indent=2)}]
+            "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+            "isError": False
         }
 
-class MCPHTTPServer:
-    """HTTP server that exposes MCP over HTTP/SSE"""
+bridge = SimpleMCPBridge()
+
+async def handle_root(request):
+    """Root endpoint"""
+    return web.json_response({
+        "name": "OpenClaw MCP Server",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "/sse": "SSE endpoint for Claude",
+            "/messages": "MCP messages",
+            "/health": "Health check"
+        }
+    })
+
+async def handle_health(request):
+    """Health check"""
+    return web.json_response({"status": "healthy", "timestamp": str(asyncio.get_event_loop().time())})
+
+async def handle_sse(request):
+    """SSE endpoint - crucial for Claude"""
+    response = web.StreamResponse()
+    response.headers['Content-Type'] = 'text/event-stream'
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Connection'] = 'keep-alive'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = '*'
     
-    def __init__(self):
-        self.bridge = SimpleMCPBridge()
-        self.app = web.Application()
-        self.setup_routes()
-        
-    def setup_routes(self):
-        self.app.router.add_get('/sse', self.handle_sse)
-        self.app.router.add_post('/messages', self.handle_message)
-        self.app.router.add_get('/health', self.handle_health)
-        self.app.router.add_get('/', self.handle_root)
-        
-        cors = aiohttp_cors.setup(self.app, defaults={
-            "*": aiohttp_cors.ResourceOptions(
-                allow_credentials=True, expose_headers="*",
-                allow_headers="*", allow_methods="*"
-            )
-        })
-        for route in list(self.app.router.routes()):
-            cors.add(route)
+    await response.prepare(request)
     
-    async def handle_root(self, request):
+    # Send endpoint event immediately
+    await response.write(b"event: endpoint\ndata: /messages\n\n")
+    
+    # Keep connection alive with heartbeats
+    try:
+        while True:
+            await asyncio.sleep(25)
+            await response.write(b": ping\n\n")
+    except (asyncio.CancelledError, ConnectionResetError):
+        pass
+    
+    return response
+
+async def handle_message(request):
+    """Handle MCP messages"""
+    try:
+        body = await request.json()
+        method = body.get("method", "")
+        params = body.get("params", {})
+        request_id = body.get("id")
+        
+        if method == "initialize":
+            result = await bridge.handle_initialize(params)
+        elif method == "tools/list":
+            result = await bridge.handle_tools_list(params)
+        elif method == "tools/call":
+            result = await bridge.handle_tools_call(params)
+        else:
+            result = {"error": f"Unknown method: {method}"}
+        
         return web.json_response({
-            "name": "OpenClaw MCP Server (Render)",
-            "version": "1.0.0",
-            "status": "running",
-            "endpoints": {
-                "sse": "/sse - Connect here for Claude Desktop",
-                "messages": "/messages - Send messages",
-                "health": "/health - Health check"
-            }
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result
         })
+    except Exception as e:
+        return web.json_response({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32603, "message": str(e)}
+        }, status=500)
+
+async def handle_options(request):
+    """Handle CORS preflight"""
+    return web.Response(
+        status=200,
+        headers={
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': '*',
+            'Access-Control-Max-Age': '86400'
+        }
+    )
+
+def main():
+    app = web.Application()
     
-    async def handle_health(self, request):
-        return web.json_response({"status": "healthy"})
+    # Routes
+    app.router.add_get('/', handle_root)
+    app.router.add_get('/health', handle_health)
+    app.router.add_get('/sse', handle_sse)
+    app.router.add_post('/messages', handle_message)
+    app.router.add_options('/messages', handle_options)
+    app.router.add_options('/sse', handle_options)
     
-    async def handle_sse(self, request):
-        response = web.StreamResponse()
-        response.headers['Content-Type'] = 'text/event-stream'
-        response.headers['Cache-Control'] = 'no-cache'
-        await response.prepare(request)
-        
-        await response.write(b"event: endpoint\ndata: /messages\n\n")
-        
-        try:
-            while True:
-                await asyncio.sleep(30)
-                await response.write(f": heartbeat\n\n".encode())
-        except asyncio.CancelledError:
-            pass
-        return response
-    
-    async def handle_message(self, request):
-        try:
-            body = await request.json()
-            method = body.get("method", "")
-            params = body.get("params", {})
-            request_id = body.get("id")
-            
-            if method == "initialize":
-                result = await self.bridge.handle_initialize(params)
-            elif method == "tools/list":
-                result = await self.bridge.handle_tools_list(params)
-            elif method == "tools/call":
-                result = await self.bridge.handle_tools_call(params)
-            else:
-                result = {"error": f"Unknown method: {method}"}
-            
-            return web.json_response({
-                "jsonrpc": "2.0", "id": request_id, "result": result
-            })
-        except Exception as e:
-            return web.json_response({
-                "jsonrpc": "2.0", "id": None,
-                "error": {"code": -32603, "message": str(e)}
-            }, status=500)
-    
-    def run(self):
-        port = int(os.environ.get('PORT', 8001))
-        print(f"🌐 OpenClaw MCP Server starting on port {port}")
-        web.run_app(self.app, host='0.0.0.0', port=port, print=None)
+    port = int(os.environ.get('PORT', 8001))
+    print(f"🌐 OpenClaw MCP Server starting on port {port}")
+    web.run_app(app, host='0.0.0.0', port=port, print=None)
 
 if __name__ == "__main__":
-    server = MCPHTTPServer()
-    server.run()
+    main()
